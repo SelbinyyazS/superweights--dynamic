@@ -9,18 +9,55 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
 from src.models.sparse_mlp import SparseMLP
-from src.utils.metrics import active_parameter_count, superweight_concentration
+from src.utils.metrics import (
+    active_parameter_count,
+    layerwise_metrics,
+    structure_metrics,
+    superweight_concentration,
+)
+
+
+BASE_FIELDNAMES = [
+    "epoch",
+    "loss",
+    "accuracy",
+    "active_parameter_count",
+    "superweight_concentration",
+    "growth_events",
+    "pruned_edges",
+    "grown_edges",
+    "mean_pruned_weight_magnitude",
+    "mean_grown_score",
+    "neuron_prune_events",
+    "pruned_neurons",
+    "pruned_hidden1",
+    "pruned_hidden2",
+    "mean_pruned_neuron_score",
+    "compacted",
+]
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train the SAGE sparse MLP prototype.")
     parser.add_argument("--dataset", choices=["mnist", "fashion-mnist", "fashion_mnist"], default="mnist")
     parser.add_argument("--sparsity", type=float, default=0.95)
+    parser.add_argument("--dense_start", action="store_true", help="Start with all edges active.")
     parser.add_argument("--growth_mode", choices=["random", "gradient", "sage"], default="sage")
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--hidden_dim", type=int, default=256)
     parser.add_argument("--growth_interval", type=int, default=100)
     parser.add_argument("--prune_fraction", type=float, default=0.05)
+    parser.add_argument("--neuron_prune_start_epoch", type=int, default=0)
+    parser.add_argument("--neuron_prune_interval", type=int, default=1)
+    parser.add_argument("--neuron_prune_fraction", type=float, default=0.0)
+    parser.add_argument("--neuron_protect_fraction", type=float, default=0.05)
+    parser.add_argument("--min_hidden_neurons", type=int, default=8)
+    parser.add_argument(
+        "--compact_epoch",
+        type=int,
+        default=0,
+        help="Epoch for physical compaction; -1 compacts after the final training epoch, 0 disables it.",
+    )
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--data_dir", type=Path, default=Path("data"))
@@ -72,6 +109,61 @@ def build_dataloaders(args: argparse.Namespace) -> tuple[DataLoader, DataLoader]
     return train_loader, eval_loader
 
 
+def empty_epoch_growth_stats() -> dict[str, float]:
+    return {
+        "growth_events": 0.0,
+        "pruned_edges": 0.0,
+        "grown_edges": 0.0,
+        "mean_pruned_weight_magnitude": 0.0,
+        "mean_grown_score": 0.0,
+    }
+
+
+def update_epoch_growth_stats(epoch_stats: dict[str, float], growth_stats: dict[str, float]) -> None:
+    epoch_stats["growth_events"] += 1.0
+    epoch_stats["pruned_edges"] += growth_stats["pruned"]
+    epoch_stats["grown_edges"] += growth_stats["grown"]
+    epoch_stats["mean_pruned_weight_magnitude"] += (
+        growth_stats["mean_pruned_weight_magnitude"] * growth_stats["pruned"]
+    )
+    epoch_stats["mean_grown_score"] += growth_stats["mean_grown_score"] * growth_stats["grown"]
+
+
+def finalize_epoch_growth_stats(epoch_stats: dict[str, float]) -> dict[str, float]:
+    finalized = dict(epoch_stats)
+    if finalized["pruned_edges"] > 0:
+        finalized["mean_pruned_weight_magnitude"] /= finalized["pruned_edges"]
+    if finalized["grown_edges"] > 0:
+        finalized["mean_grown_score"] /= finalized["grown_edges"]
+    return finalized
+
+
+def empty_epoch_neuron_stats() -> dict[str, float]:
+    return {
+        "neuron_prune_events": 0.0,
+        "pruned_neurons": 0.0,
+        "pruned_hidden1": 0.0,
+        "pruned_hidden2": 0.0,
+        "mean_pruned_neuron_score": 0.0,
+    }
+
+
+def should_prune_neurons(args: argparse.Namespace, epoch: int) -> bool:
+    return (
+        args.neuron_prune_fraction > 0.0
+        and args.neuron_prune_start_epoch > 0
+        and args.neuron_prune_interval > 0
+        and epoch >= args.neuron_prune_start_epoch
+        and (epoch - args.neuron_prune_start_epoch) % args.neuron_prune_interval == 0
+    )
+
+
+def should_compact(args: argparse.Namespace, epoch: int) -> bool:
+    return args.compact_epoch == epoch or (
+        args.compact_epoch == -1 and epoch == args.epochs
+    )
+
+
 def train_epoch(
     model: SparseMLP,
     loader: DataLoader,
@@ -79,8 +171,9 @@ def train_epoch(
     device: torch.device,
     args: argparse.Namespace,
     global_step: int,
-) -> int:
+) -> tuple[int, dict[str, float]]:
     model.train()
+    epoch_growth_stats = empty_epoch_growth_stats()
     for batch_idx, (inputs, targets) in enumerate(loader, start=1):
         if args.train_batches and batch_idx > args.train_batches:
             break
@@ -99,13 +192,14 @@ def train_epoch(
             and args.prune_fraction > 0.0
             and global_step % args.growth_interval == 0
         ):
-            model.prune_and_grow(args.prune_fraction, args.growth_mode)
+            growth_stats = model.prune_and_grow(args.prune_fraction, args.growth_mode)
+            update_epoch_growth_stats(epoch_growth_stats, growth_stats)
 
         model.mask_gradients()
         optimizer.step()
         model.apply_mask_to_weights()
 
-    return global_step
+    return global_step, finalize_epoch_growth_stats(epoch_growth_stats)
 
 
 @torch.no_grad()
@@ -142,14 +236,16 @@ def main() -> None:
     device = select_device()
 
     train_loader, eval_loader = build_dataloaders(args)
-    model = SparseMLP(hidden_dim=args.hidden_dim, sparsity=args.sparsity).to(device)
+    model_sparsity = 0.0 if args.dense_start else args.sparsity
+    model = SparseMLP(hidden_dim=args.hidden_dim, sparsity=model_sparsity).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     args.log_path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = ["epoch", "loss", "accuracy", "active_parameter_count", "superweight_concentration"]
+    fieldnames = BASE_FIELDNAMES + list(structure_metrics(model).keys()) + list(layerwise_metrics(model).keys())
     global_step = 0
 
     print(f"Using device: {device}")
+    print(f"Start mode: {'dense' if args.dense_start else 'sparse'}")
     print(f"Initial active parameters: {active_parameter_count(model)}")
 
     with args.log_path.open("w", newline="") as log_file:
@@ -157,25 +253,65 @@ def main() -> None:
         writer.writeheader()
 
         for epoch in range(1, args.epochs + 1):
-            global_step = train_epoch(model, train_loader, optimizer, device, args, global_step)
+            global_step, growth_stats = train_epoch(
+                model,
+                train_loader,
+                optimizer,
+                device,
+                args,
+                global_step,
+            )
+
+            neuron_stats = empty_epoch_neuron_stats()
+            if should_prune_neurons(args, epoch):
+                neuron_stats = model.prune_weak_neurons(
+                    prune_fraction=args.neuron_prune_fraction,
+                    protect_fraction=args.neuron_protect_fraction,
+                    min_hidden_neurons=args.min_hidden_neurons,
+                )
+                model.apply_mask_to_weights()
+
+            compacted = 0
+            if should_compact(args, epoch):
+                model = model.compact().to(device)
+                optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+                compacted = 1
+
             loss, acc = evaluate(model, eval_loader, device, args.eval_batches)
             active_params = active_parameter_count(model)
             concentration = superweight_concentration(model)
 
-            writer.writerow(
-                {
-                    "epoch": epoch,
-                    "loss": f"{loss:.6f}",
-                    "accuracy": f"{acc:.6f}",
-                    "active_parameter_count": active_params,
-                    "superweight_concentration": f"{concentration:.6f}",
-                }
-            )
+            row = {
+                "epoch": epoch,
+                "loss": f"{loss:.6f}",
+                "accuracy": f"{acc:.6f}",
+                "active_parameter_count": active_params,
+                "superweight_concentration": f"{concentration:.6f}",
+                "growth_events": int(growth_stats["growth_events"]),
+                "pruned_edges": int(growth_stats["pruned_edges"]),
+                "grown_edges": int(growth_stats["grown_edges"]),
+                "mean_pruned_weight_magnitude": f"{growth_stats['mean_pruned_weight_magnitude']:.6f}",
+                "mean_grown_score": f"{growth_stats['mean_grown_score']:.6f}",
+                "neuron_prune_events": int(neuron_stats["neuron_prune_events"]),
+                "pruned_neurons": int(neuron_stats["pruned_neurons"]),
+                "pruned_hidden1": int(neuron_stats["pruned_hidden1"]),
+                "pruned_hidden2": int(neuron_stats["pruned_hidden2"]),
+                "mean_pruned_neuron_score": f"{neuron_stats['mean_pruned_neuron_score']:.6f}",
+                "compacted": compacted,
+            }
+            for key, value in structure_metrics(model).items():
+                row[key] = int(value)
+            for key, value in layerwise_metrics(model).items():
+                row[key] = f"{value:.6f}"
+            writer.writerow(row)
             log_file.flush()
 
             print(
                 f"epoch={epoch} loss={loss:.4f} acc={acc:.4f} "
-                f"active_params={active_params} concentration={concentration:.4f}"
+                f"active_params={active_params} concentration={concentration:.4f} "
+                f"grown={int(growth_stats['grown_edges'])} "
+                f"pruned_neurons={int(neuron_stats['pruned_neurons'])} "
+                f"hidden={model.active_hidden_counts()}"
             )
 
     print(f"Wrote CSV log to {args.log_path}")

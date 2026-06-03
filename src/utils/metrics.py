@@ -17,6 +17,14 @@ def active_parameter_count(model: nn.Module) -> int:
     )
 
 
+def physical_parameter_count(model: nn.Module) -> int:
+    return sum(
+        int(module.weight.numel())
+        for module in model.modules()
+        if isinstance(module, MaskedLinear)
+    )
+
+
 def superweight_concentration(model: nn.Module, top_fraction: float = 0.01) -> float:
     """Share of active weight magnitude held by the top active weights."""
 
@@ -37,3 +45,44 @@ def superweight_concentration(model: nn.Module, top_fraction: float = 0.01) -> f
 
     top_k = max(1, int(weights.numel() * top_fraction))
     return (torch.topk(weights, top_k).values.sum() / total).item()
+
+
+def layerwise_metrics(model: nn.Module) -> dict[str, float]:
+    metrics = {}
+    layers = [module for module in model.modules() if isinstance(module, MaskedLinear)]
+    for layer_idx, layer in enumerate(layers):
+        active_params = layer.active_parameter_count()
+        total_params = layer.mask.numel()
+        active_scores = layer.score_ema.detach()[layer.mask.bool()]
+        inactive_scores = layer.score_ema.detach()[~layer.mask.bool()]
+
+        metrics[f"layer_{layer_idx}_active_parameter_count"] = float(active_params)
+        metrics[f"layer_{layer_idx}_density"] = active_params / total_params
+        metrics[f"layer_{layer_idx}_active_score_mean"] = (
+            active_scores.mean().item() if active_scores.numel() > 0 else 0.0
+        )
+        metrics[f"layer_{layer_idx}_inactive_score_mean"] = (
+            inactive_scores.mean().item() if inactive_scores.numel() > 0 else 0.0
+        )
+        metrics[f"layer_{layer_idx}_score_max"] = layer.score_ema.max().item()
+        metrics[f"layer_{layer_idx}_last_pruned"] = layer.last_growth_stats["pruned"]
+        metrics[f"layer_{layer_idx}_last_grown"] = layer.last_growth_stats["grown"]
+    return metrics
+
+
+def structure_metrics(model: nn.Module) -> dict[str, float]:
+    metrics = {
+        "physical_parameter_count": float(physical_parameter_count(model)),
+    }
+    if hasattr(model, "hidden_dims") and hasattr(model, "active_hidden_counts"):
+        hidden1_dim, hidden2_dim = model.hidden_dims()
+        active_hidden1, active_hidden2 = model.active_hidden_counts()
+        metrics.update(
+            {
+                "hidden1_dim": float(hidden1_dim),
+                "hidden2_dim": float(hidden2_dim),
+                "active_hidden1": float(active_hidden1),
+                "active_hidden2": float(active_hidden2),
+            }
+        )
+    return metrics

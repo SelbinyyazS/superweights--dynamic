@@ -7,6 +7,7 @@ from torch.nn import functional as F
 
 
 GrowthMode = Literal["random", "gradient", "sage"]
+GrowthStats = dict[str, float]
 
 
 class _MaskedWeight(torch.autograd.Function):
@@ -54,9 +55,21 @@ class MaskedLinear(nn.Module):
         mask = self._initial_mask(out_features, in_features, sparsity)
         self.register_buffer("mask", mask)
         self.register_buffer("score_ema", torch.zeros(out_features, in_features))
+        self.register_buffer("activation_ema", torch.zeros(out_features))
+        self.register_buffer("grad_output_ema", torch.zeros(out_features))
         self.last_input_activation: torch.Tensor | None = None
+        self.last_growth_stats = self._empty_growth_stats()
 
         self.reset_parameters()
+
+    @staticmethod
+    def _empty_growth_stats() -> GrowthStats:
+        return {
+            "pruned": 0.0,
+            "grown": 0.0,
+            "mean_pruned_weight_magnitude": 0.0,
+            "mean_grown_score": 0.0,
+        }
 
     @staticmethod
     def _initial_mask(out_features: int, in_features: int, sparsity: float) -> torch.Tensor:
@@ -78,6 +91,12 @@ class MaskedLinear(nn.Module):
         self.last_input_activation = x.detach()
         masked_weight = _MaskedWeight.apply(self.weight, self.mask)
         output = F.linear(x, masked_weight, self.bias)
+        if self.training:
+            with torch.no_grad():
+                output_batch = self._as_batch(output.detach())
+                output_score = output_batch.abs().mean(dim=0)
+                self.activation_ema.mul_(self.score_ema_decay)
+                self.activation_ema.add_(output_score, alpha=1.0 - self.score_ema_decay)
         if self.training and output.requires_grad:
             output.register_hook(self._make_score_hook(x.detach()))
         return output
@@ -92,6 +111,8 @@ class MaskedLinear(nn.Module):
                 batch_score = grad_score.unsqueeze(1) * input_score.unsqueeze(0)
                 self.score_ema.mul_(self.score_ema_decay)
                 self.score_ema.add_(batch_score, alpha=1.0 - self.score_ema_decay)
+                self.grad_output_ema.mul_(self.score_ema_decay)
+                self.grad_output_ema.add_(grad_score, alpha=1.0 - self.score_ema_decay)
             return grad_output
 
         return hook
@@ -115,17 +136,45 @@ class MaskedLinear(nn.Module):
     def active_parameter_count(self) -> int:
         return int(self.mask.sum().item())
 
-    def prune_and_grow(self, prune_fraction: float, growth_mode: GrowthMode) -> int:
+    def disable_output_neurons(self, neuron_idx: torch.Tensor) -> None:
+        if neuron_idx.numel() == 0:
+            return
+        with torch.no_grad():
+            self.mask[neuron_idx, :] = 0.0
+            self.weight[neuron_idx, :] = 0.0
+            self.score_ema[neuron_idx, :] = 0.0
+            self.activation_ema[neuron_idx] = 0.0
+            self.grad_output_ema[neuron_idx] = 0.0
+            if self.weight.grad is not None:
+                self.weight.grad[neuron_idx, :] = 0.0
+            if self.bias is not None:
+                self.bias[neuron_idx] = 0.0
+                if self.bias.grad is not None:
+                    self.bias.grad[neuron_idx] = 0.0
+
+    def disable_input_neurons(self, neuron_idx: torch.Tensor) -> None:
+        if neuron_idx.numel() == 0:
+            return
+        with torch.no_grad():
+            self.mask[:, neuron_idx] = 0.0
+            self.weight[:, neuron_idx] = 0.0
+            self.score_ema[:, neuron_idx] = 0.0
+            if self.weight.grad is not None:
+                self.weight.grad[:, neuron_idx] = 0.0
+
+    def prune_and_grow(self, prune_fraction: float, growth_mode: GrowthMode) -> GrowthStats:
         if not 0.0 <= prune_fraction <= 1.0:
             raise ValueError("prune_fraction must be in [0, 1].")
         if growth_mode not in ("random", "gradient", "sage"):
             raise ValueError("growth_mode must be one of: random, gradient, sage.")
 
+        stats = self._empty_growth_stats()
         active_mask = self.mask.bool()
         active_count = int(active_mask.sum().item())
         prune_count = int(active_count * prune_fraction)
         if prune_count == 0:
-            return 0
+            self.last_growth_stats = stats
+            return stats
 
         with torch.no_grad():
             flat_mask = self.mask.view(-1)
@@ -134,6 +183,8 @@ class MaskedLinear(nn.Module):
 
             active_scores = self.weight.detach().abs().masked_fill(~active_mask, float("inf"))
             prune_idx = torch.topk(active_scores.view(-1), prune_count, largest=False).indices
+            stats["pruned"] = float(prune_count)
+            stats["mean_pruned_weight_magnitude"] = flat_weight[prune_idx].abs().mean().item()
             flat_mask[prune_idx] = 0.0
             flat_weight[prune_idx] = 0.0
             flat_score_ema[prune_idx] = 0.0
@@ -142,10 +193,13 @@ class MaskedLinear(nn.Module):
             inactive_mask = ~self.mask.bool()
             grow_count = min(prune_count, int(inactive_mask.sum().item()))
             if grow_count == 0:
-                return prune_count
+                self.last_growth_stats = stats
+                return stats
 
             grow_scores = grow_scores.masked_fill(~inactive_mask, float("-inf"))
             grow_idx = torch.topk(grow_scores.view(-1), grow_count, largest=True).indices
+            stats["grown"] = float(grow_count)
+            stats["mean_grown_score"] = grow_scores.view(-1)[grow_idx].mean().item()
 
             flat_mask[grow_idx] = 1.0
             flat_weight[grow_idx] = torch.randn(
@@ -155,7 +209,8 @@ class MaskedLinear(nn.Module):
             ) * self.grow_init_std
             flat_score_ema[grow_idx] = 0.0
 
-        return prune_count
+        self.last_growth_stats = stats
+        return stats
 
     def _growth_scores(self, growth_mode: GrowthMode) -> torch.Tensor:
         if growth_mode == "random":
