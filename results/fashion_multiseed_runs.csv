@@ -1,0 +1,13 @@
+log,mode,seed,final_accuracy,best_accuracy,best_epoch,final_physical_params,physical_reduction,hidden1_dim,hidden2_dim,concentration,compacted
+logs/fashion_multiseed/dense_seed1.csv,dense,1,0.8862,0.8925,18,268800,0.00%,256,256,0.0496,0
+logs/fashion_multiseed/dense_seed2.csv,dense,2,0.8912,0.8943,19,268800,0.00%,256,256,0.0503,0
+logs/fashion_multiseed/dense_seed3.csv,dense,3,0.8886,0.8932,16,268800,0.00%,256,256,0.0506,0
+logs/fashion_multiseed/magnitude_seed1.csv,magnitude,1,0.8800,0.8881,15,106587,60.35%,117,117,0.0482,1
+logs/fashion_multiseed/magnitude_seed2.csv,magnitude,2,0.8715,0.8868,19,106587,60.35%,117,117,0.0478,1
+logs/fashion_multiseed/magnitude_seed3.csv,magnitude,3,0.8875,0.8891,12,106587,60.35%,117,117,0.0472,1
+logs/fashion_multiseed/random_seed1.csv,random,1,0.8749,0.8817,11,106587,60.35%,117,117,0.0503,1
+logs/fashion_multiseed/random_seed2.csv,random,2,0.8707,0.8834,16,106587,60.35%,117,117,0.0506,1
+logs/fashion_multiseed/random_seed3.csv,random,3,0.8813,0.8889,12,106587,60.35%,117,117,0.0507,1
+logs/fashion_multiseed/sage_seed1.csv,sage,1,0.8839,0.8889,17,106587,60.35%,117,117,0.0483,1
+logs/fashion_multiseed/sage_seed2.csv,sage,2,0.8861,0.8915,12,106587,60.35%,117,117,0.0485,1
+logs/fashion_multiseed/sage_seed3.csv,sage,3,0.8873,0.8914,16,106587,60.35%,117,117,0.0480,1

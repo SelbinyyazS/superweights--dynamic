@@ -35,6 +35,7 @@ python train.py \
   --neuron_prune_start_epoch 5 \
   --neuron_prune_interval 1 \
   --neuron_prune_fraction 0.05 \
+  --neuron_prune_mode sage \
   --neuron_protect_fraction 0.05 \
   --compact_epoch -1 \
   --log_path logs/sage_focus.csv
@@ -95,6 +96,7 @@ python train.py \
 - `--neuron_prune_start_epoch`: first epoch for masked neuron pruning; `0` disables it
 - `--neuron_prune_interval`: epochs between neuron-pruning events
 - `--neuron_prune_fraction`: fraction of currently active hidden neurons to prune per event
+- `--neuron_prune_mode`: `sage`, `magnitude`, or `random`
 - `--neuron_protect_fraction`: fraction of highest-score hidden neurons protected from pruning
 - `--min_hidden_neurons`: minimum surviving neurons per hidden layer
 - `--compact_epoch`: epoch when surviving hidden neurons are copied into a physically smaller model; `-1` compacts after the final training epoch, `0` disables compaction
@@ -118,6 +120,82 @@ The CSV includes the required training fields plus extra diagnostics:
 - `neuron_prune_events`, `pruned_neurons`, `pruned_hidden1`, `pruned_hidden2`, `mean_pruned_neuron_score`
 - `physical_parameter_count`, `hidden1_dim`, `hidden2_dim`, `active_hidden1`, `active_hidden2`
 - per-layer active parameter counts, densities, active/inactive SAGE score means, max SAGE score, and last prune-grow counts
+
+## Comparing Focused Pruning Modes
+
+After running a dense baseline and SAGE-Focus, run these pruning baselines:
+
+```bash
+python train.py \
+  --dataset mnist \
+  --dense_start \
+  --growth_interval 0 \
+  --epochs 20 \
+  --hidden_dim 256 \
+  --neuron_prune_start_epoch 5 \
+  --neuron_prune_interval 1 \
+  --neuron_prune_fraction 0.05 \
+  --neuron_prune_mode magnitude \
+  --neuron_protect_fraction 0.05 \
+  --compact_epoch -1 \
+  --log_path logs/magnitude_focus.csv
+
+python train.py \
+  --dataset mnist \
+  --dense_start \
+  --growth_interval 0 \
+  --epochs 20 \
+  --hidden_dim 256 \
+  --neuron_prune_start_epoch 5 \
+  --neuron_prune_interval 1 \
+  --neuron_prune_fraction 0.05 \
+  --neuron_prune_mode random \
+  --neuron_protect_fraction 0.05 \
+  --compact_epoch -1 \
+  --log_path logs/random_focus.csv
+```
+
+Summarize the comparison:
+
+```bash
+python summarize_logs.py \
+  logs/dense_baseline.csv \
+  logs/sage_focus.csv \
+  logs/magnitude_focus.csv \
+  logs/random_focus.csv
+```
+
+## Multi-Seed Experiments
+
+Run the full dense/SAGE/magnitude/random comparison for seeds 1, 2, and 3:
+
+```bash
+python run_multiseed.py --seeds 1 2 3
+```
+
+Logs are written to `logs/multiseed/` with names like `sage_seed2.csv`.
+The runner uses `.venv/bin/python` automatically when that file exists. You can override it with `--python /path/to/python`.
+
+Summarize each run:
+
+```bash
+python summarize_logs.py logs/multiseed/*.csv
+```
+
+Summarize mean and standard deviation by pruning mode:
+
+```bash
+python summarize_logs.py --aggregate logs/multiseed/*.csv
+```
+
+Useful runner options:
+
+- `--modes dense sage magnitude random`: choose which experiment modes to run
+- `--dataset mnist` or `--dataset fashion-mnist`
+- `--skip_existing`: resume without rerunning completed logs
+- `--dry_run`: print commands without running them
+- `--train_batches` and `--eval_batches`: quick debugging runs
+- `--python`: choose the Python executable used for `train.py`
 
 ## Notes
 

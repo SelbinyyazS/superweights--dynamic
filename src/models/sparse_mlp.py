@@ -6,6 +6,7 @@ from src.models.sage_layer import GrowthMode, GrowthStats, MaskedLinear
 
 
 NeuronStats = dict[str, float]
+NeuronPruneMode = str
 
 
 class SparseMLP(nn.Module):
@@ -96,7 +97,11 @@ class SparseMLP(nn.Module):
         self.layers[1].disable_output_neurons(dead_hidden2)
         self.layers[2].disable_input_neurons(dead_hidden2)
 
-    def hidden_neuron_importance(self, hidden_layer_idx: int) -> torch.Tensor:
+    def hidden_neuron_importance(
+        self,
+        hidden_layer_idx: int,
+        mode: NeuronPruneMode = "sage",
+    ) -> torch.Tensor:
         if hidden_layer_idx == 0:
             producer = self.layers[0]
             consumer = self.layers[1]
@@ -107,16 +112,24 @@ class SparseMLP(nn.Module):
             neuron_mask = self.hidden2_neuron_mask.bool()
         else:
             raise ValueError("hidden_layer_idx must be 0 or 1.")
+        if mode not in ("sage", "magnitude", "random"):
+            raise ValueError("mode must be one of: sage, magnitude, random.")
 
         incoming_weight = (producer.weight.detach().abs() * producer.mask).sum(dim=1)
         outgoing_weight = (consumer.weight.detach().abs() * consumer.mask).sum(dim=0)
+        magnitude_score = self._normalize((incoming_weight * outgoing_weight).sqrt())
+        if mode == "magnitude":
+            return magnitude_score.masked_fill(~neuron_mask, float("-inf"))
+        if mode == "random":
+            return torch.rand_like(magnitude_score).masked_fill(~neuron_mask, float("-inf"))
+
         incoming_sage = producer.score_ema.detach().sum(dim=1)
         outgoing_sage = consumer.score_ema.detach().sum(dim=0)
         activity_signal = producer.activation_ema.detach() * producer.grad_output_ema.detach()
 
         score = (
             self._normalize(activity_signal)
-            + self._normalize((incoming_weight * outgoing_weight).sqrt())
+            + magnitude_score
             + self._normalize(incoming_sage + outgoing_sage)
         )
         return score.masked_fill(~neuron_mask, float("-inf"))
@@ -144,6 +157,7 @@ class SparseMLP(nn.Module):
     def prune_weak_neurons(
         self,
         prune_fraction: float,
+        mode: NeuronPruneMode = "sage",
         protect_fraction: float = 0.05,
         min_hidden_neurons: int = 8,
     ) -> NeuronStats:
@@ -151,6 +165,8 @@ class SparseMLP(nn.Module):
             raise ValueError("prune_fraction must be in [0, 1].")
         if not 0.0 <= protect_fraction <= 1.0:
             raise ValueError("protect_fraction must be in [0, 1].")
+        if mode not in ("sage", "magnitude", "random"):
+            raise ValueError("mode must be one of: sage, magnitude, random.")
 
         stats = self._empty_neuron_stats()
         pruned_score_sum = 0.0
@@ -166,7 +182,7 @@ class SparseMLP(nn.Module):
             if prune_count == 0:
                 continue
 
-            importance = self.hidden_neuron_importance(hidden_layer_idx)
+            importance = self.hidden_neuron_importance(hidden_layer_idx, mode=mode)
             candidate_scores = importance.clone()
             protect_count = min(
                 int(alive_count * protect_fraction),

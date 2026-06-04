@@ -29,6 +29,7 @@ BASE_FIELDNAMES = [
     "mean_pruned_weight_magnitude",
     "mean_grown_score",
     "neuron_prune_events",
+    "neuron_prune_mode",
     "pruned_neurons",
     "pruned_hidden1",
     "pruned_hidden2",
@@ -50,6 +51,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--neuron_prune_start_epoch", type=int, default=0)
     parser.add_argument("--neuron_prune_interval", type=int, default=1)
     parser.add_argument("--neuron_prune_fraction", type=float, default=0.0)
+    parser.add_argument(
+        "--neuron_prune_mode",
+        choices=["sage", "magnitude", "random"],
+        default="sage",
+    )
     parser.add_argument("--neuron_protect_fraction", type=float, default=0.05)
     parser.add_argument("--min_hidden_neurons", type=int, default=8)
     parser.add_argument(
@@ -266,6 +272,7 @@ def main() -> None:
             if should_prune_neurons(args, epoch):
                 neuron_stats = model.prune_weak_neurons(
                     prune_fraction=args.neuron_prune_fraction,
+                    mode=args.neuron_prune_mode,
                     protect_fraction=args.neuron_protect_fraction,
                     min_hidden_neurons=args.min_hidden_neurons,
                 )
@@ -293,6 +300,7 @@ def main() -> None:
                 "mean_pruned_weight_magnitude": f"{growth_stats['mean_pruned_weight_magnitude']:.6f}",
                 "mean_grown_score": f"{growth_stats['mean_grown_score']:.6f}",
                 "neuron_prune_events": int(neuron_stats["neuron_prune_events"]),
+                "neuron_prune_mode": args.neuron_prune_mode,
                 "pruned_neurons": int(neuron_stats["pruned_neurons"]),
                 "pruned_hidden1": int(neuron_stats["pruned_hidden1"]),
                 "pruned_hidden2": int(neuron_stats["pruned_hidden2"]),
