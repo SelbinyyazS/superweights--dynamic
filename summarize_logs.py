@@ -76,6 +76,12 @@ def summarize_log(path: Path) -> dict[str, float | str]:
         "hidden2_dim": as_float(final, "hidden2_dim"),
         "active_hidden1": as_float(final, "active_hidden1"),
         "active_hidden2": as_float(final, "active_hidden2"),
+        "total_active_channels": as_float(final, "total_active_channels"),
+        "conv0_channels": as_float(final, "conv0_channels"),
+        "conv1_channels": as_float(final, "conv1_channels"),
+        "conv2_channels": as_float(final, "conv2_channels"),
+        "conv3_channels": as_float(final, "conv3_channels"),
+        "conv4_channels": as_float(final, "conv4_channels"),
         "concentration": as_float(final, "superweight_concentration"),
         "compacted": as_float(final, "compacted"),
     }
@@ -128,6 +134,7 @@ def aggregate_summaries(summaries: list[dict[str, float | str]]) -> list[dict[st
         concentrations = [float(summary["concentration"]) for summary in mode_summaries]
         hidden1 = [float(summary["hidden1_dim"]) for summary in mode_summaries]
         hidden2 = [float(summary["hidden2_dim"]) for summary in mode_summaries]
+        active_channels = [float(summary["total_active_channels"]) for summary in mode_summaries]
         rows.append(
             {
                 "mode": mode,
@@ -140,6 +147,7 @@ def aggregate_summaries(summaries: list[dict[str, float | str]]) -> list[dict[st
                 "physical_reduction_mean": mean(reductions),
                 "hidden1_dim_mean": mean(hidden1),
                 "hidden2_dim_mean": mean(hidden2),
+                "total_active_channels_mean": mean(active_channels),
                 "concentration_mean": mean(concentrations),
                 "concentration_std": std(concentrations),
             }
@@ -164,6 +172,7 @@ def main() -> None:
             "physical_reduction_mean",
             "hidden1_dim_mean",
             "hidden2_dim_mean",
+            "total_active_channels_mean",
             "concentration_mean",
             "concentration_std",
         ]
@@ -180,6 +189,12 @@ def main() -> None:
             "physical_reduction",
             "hidden1_dim",
             "hidden2_dim",
+            "total_active_channels",
+            "conv0_channels",
+            "conv1_channels",
+            "conv2_channels",
+            "conv3_channels",
+            "conv4_channels",
             "concentration",
             "compacted",
         ]

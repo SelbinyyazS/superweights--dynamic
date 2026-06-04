@@ -1,7 +1,11 @@
 import torch
 from torch import nn
 
+from src.models.sage_conv import MaskedConv2d
 from src.models.sage_layer import MaskedLinear
+
+
+MASKED_LAYER_TYPES = (MaskedConv2d, MaskedLinear)
 
 
 def accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
@@ -9,31 +13,26 @@ def accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
     return (predictions == targets).float().mean().item()
 
 
+def masked_layers(model: nn.Module) -> list[nn.Module]:
+    return [module for module in model.modules() if isinstance(module, MASKED_LAYER_TYPES)]
+
+
 def active_parameter_count(model: nn.Module) -> int:
-    return sum(
-        int(module.mask.sum().item())
-        for module in model.modules()
-        if isinstance(module, MaskedLinear)
-    )
+    return sum(int(module.mask.sum().item()) for module in masked_layers(model))
 
 
 def physical_parameter_count(model: nn.Module) -> int:
-    return sum(
-        int(module.weight.numel())
-        for module in model.modules()
-        if isinstance(module, MaskedLinear)
-    )
+    return sum(int(module.weight.numel()) for module in masked_layers(model))
 
 
 def superweight_concentration(model: nn.Module, top_fraction: float = 0.01) -> float:
     """Share of active weight magnitude held by the top active weights."""
 
     active_weights = []
-    for module in model.modules():
-        if isinstance(module, MaskedLinear):
-            weights = module.weight.detach().abs()[module.mask.bool()]
-            if weights.numel() > 0:
-                active_weights.append(weights.flatten())
+    for module in masked_layers(model):
+        weights = module.weight.detach().abs()[module.mask.bool()]
+        if weights.numel() > 0:
+            active_weights.append(weights.flatten())
 
     if not active_weights:
         return 0.0
@@ -49,7 +48,7 @@ def superweight_concentration(model: nn.Module, top_fraction: float = 0.01) -> f
 
 def layerwise_metrics(model: nn.Module) -> dict[str, float]:
     metrics = {}
-    layers = [module for module in model.modules() if isinstance(module, MaskedLinear)]
+    layers = masked_layers(model)
     for layer_idx, layer in enumerate(layers):
         active_params = layer.active_parameter_count()
         total_params = layer.mask.numel()
@@ -74,6 +73,8 @@ def structure_metrics(model: nn.Module) -> dict[str, float]:
     metrics = {
         "physical_parameter_count": float(physical_parameter_count(model)),
     }
+    if hasattr(model, "structure_metrics"):
+        metrics.update(model.structure_metrics())
     if hasattr(model, "hidden_dims") and hasattr(model, "active_hidden_counts"):
         hidden1_dim, hidden2_dim = model.hidden_dims()
         active_hidden1, active_hidden2 = model.active_hidden_counts()

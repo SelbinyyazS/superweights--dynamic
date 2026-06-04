@@ -8,6 +8,7 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
+from src.models.sage_cnn import SageCifarCNN
 from src.models.sparse_mlp import SparseMLP
 from src.utils.metrics import (
     active_parameter_count,
@@ -34,6 +35,13 @@ BASE_FIELDNAMES = [
     "pruned_hidden1",
     "pruned_hidden2",
     "mean_pruned_neuron_score",
+    "pruned_channels",
+    "pruned_conv0_channels",
+    "pruned_conv1_channels",
+    "pruned_conv2_channels",
+    "pruned_conv3_channels",
+    "pruned_conv4_channels",
+    "mean_pruned_channel_score",
     "compacted",
     "sage_focus_steps",
     "mean_boosted_edges",
@@ -43,13 +51,24 @@ BASE_FIELDNAMES = [
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train the SAGE sparse MLP prototype.")
-    parser.add_argument("--dataset", choices=["mnist", "fashion-mnist", "fashion_mnist"], default="mnist")
+    parser = argparse.ArgumentParser(description="Train the SAGE sparse network prototype.")
+    parser.add_argument(
+        "--dataset",
+        choices=["mnist", "fashion-mnist", "fashion_mnist", "cifar10", "cifar-10"],
+        default="mnist",
+    )
+    parser.add_argument(
+        "--model",
+        choices=["auto", "mlp", "cifar_cnn"],
+        default="auto",
+        help="Model family. auto uses cifar_cnn for CIFAR-10 and mlp otherwise.",
+    )
     parser.add_argument("--sparsity", type=float, default=0.95)
     parser.add_argument("--dense_start", action="store_true", help="Start with all edges active.")
     parser.add_argument("--growth_mode", choices=["random", "gradient", "sage"], default="sage")
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--hidden_dim", type=int, default=256)
+    parser.add_argument("--base_channels", type=int, default=64)
     parser.add_argument("--growth_interval", type=int, default=100)
     parser.add_argument("--prune_fraction", type=float, default=0.05)
     parser.add_argument("--neuron_prune_start_epoch", type=int, default=0)
@@ -102,13 +121,40 @@ def select_device() -> torch.device:
     return torch.device("cpu")
 
 
-def build_dataloaders(args: argparse.Namespace) -> tuple[DataLoader, DataLoader]:
-    dataset_name = args.dataset.replace("_", "-")
-    dataset_cls = datasets.MNIST if dataset_name == "mnist" else datasets.FashionMNIST
-    transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
+def normalized_dataset_name(dataset: str) -> str:
+    dataset_name = dataset.replace("_", "-").lower()
+    if dataset_name == "cifar-10":
+        return "cifar10"
+    return dataset_name
 
-    train_dataset = dataset_cls(args.data_dir, train=True, download=True, transform=transform)
-    eval_dataset = dataset_cls(args.data_dir, train=False, download=True, transform=transform)
+
+def build_dataloaders(args: argparse.Namespace) -> tuple[DataLoader, DataLoader]:
+    dataset_name = normalized_dataset_name(args.dataset)
+    if dataset_name in ("mnist", "fashion-mnist"):
+        dataset_cls = datasets.MNIST if dataset_name == "mnist" else datasets.FashionMNIST
+        transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
+        train_dataset = dataset_cls(args.data_dir, train=True, download=True, transform=transform)
+        eval_dataset = dataset_cls(args.data_dir, train=False, download=True, transform=transform)
+    elif dataset_name == "cifar10":
+        train_transform = transforms.Compose(
+            [
+                transforms.RandomCrop(32, padding=4),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)),
+            ]
+        )
+        eval_transform = transforms.Compose(
+            [
+                transforms.ToTensor(),
+                transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)),
+            ]
+        )
+        train_dataset = datasets.CIFAR10(args.data_dir, train=True, download=True, transform=train_transform)
+        eval_dataset = datasets.CIFAR10(args.data_dir, train=False, download=True, transform=eval_transform)
+    else:
+        raise ValueError(f"Unsupported dataset: {args.dataset}")
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -124,6 +170,28 @@ def build_dataloaders(args: argparse.Namespace) -> tuple[DataLoader, DataLoader]
         pin_memory=torch.cuda.is_available(),
     )
     return train_loader, eval_loader
+
+
+def resolve_model_name(args: argparse.Namespace) -> str:
+    if args.model != "auto":
+        return args.model
+    if normalized_dataset_name(args.dataset) == "cifar10":
+        return "cifar_cnn"
+    return "mlp"
+
+
+def build_model(args: argparse.Namespace, sparsity: float) -> torch.nn.Module:
+    model_name = resolve_model_name(args)
+    dataset_name = normalized_dataset_name(args.dataset)
+    if model_name == "mlp":
+        if dataset_name not in ("mnist", "fashion-mnist"):
+            raise ValueError("The MLP model currently supports MNIST and Fashion-MNIST only.")
+        return SparseMLP(hidden_dim=args.hidden_dim, sparsity=sparsity)
+    if model_name == "cifar_cnn":
+        if dataset_name != "cifar10":
+            raise ValueError("The CIFAR CNN expects --dataset cifar10.")
+        return SageCifarCNN(base_channels=args.base_channels, sparsity=sparsity)
+    raise ValueError(f"Unsupported model: {args.model}")
 
 
 def empty_epoch_growth_stats() -> dict[str, float]:
@@ -156,13 +224,18 @@ def finalize_epoch_growth_stats(epoch_stats: dict[str, float]) -> dict[str, floa
 
 
 def empty_epoch_neuron_stats() -> dict[str, float]:
-    return {
+    stats = {
         "neuron_prune_events": 0.0,
         "pruned_neurons": 0.0,
         "pruned_hidden1": 0.0,
         "pruned_hidden2": 0.0,
         "mean_pruned_neuron_score": 0.0,
+        "pruned_channels": 0.0,
+        "mean_pruned_channel_score": 0.0,
     }
+    for conv_idx in range(5):
+        stats[f"pruned_conv{conv_idx}_channels"] = 0.0
+    return stats
 
 
 def empty_epoch_focus_stats() -> dict[str, float]:
@@ -223,7 +296,7 @@ def should_compact(args: argparse.Namespace, epoch: int) -> bool:
 
 
 def train_epoch(
-    model: SparseMLP,
+    model: torch.nn.Module,
     loader: DataLoader,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
@@ -276,7 +349,7 @@ def train_epoch(
 
 @torch.no_grad()
 def evaluate(
-    model: SparseMLP,
+    model: torch.nn.Module,
     loader: DataLoader,
     device: torch.device,
     max_batches: int = 0,
@@ -302,6 +375,14 @@ def evaluate(
     return total_loss / total_examples, total_correct / total_examples
 
 
+def model_structure_label(model: torch.nn.Module) -> str:
+    if hasattr(model, "active_hidden_counts"):
+        return f"hidden={model.active_hidden_counts()}"
+    if hasattr(model, "active_channel_counts"):
+        return f"channels={model.active_channel_counts()}"
+    return "structure=unknown"
+
+
 def main() -> None:
     args = parse_args()
     set_seed(args.seed)
@@ -309,7 +390,7 @@ def main() -> None:
 
     train_loader, eval_loader = build_dataloaders(args)
     model_sparsity = 0.0 if args.dense_start else args.sparsity
-    model = SparseMLP(hidden_dim=args.hidden_dim, sparsity=model_sparsity).to(device)
+    model = build_model(args, model_sparsity).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     args.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -317,6 +398,7 @@ def main() -> None:
     global_step = 0
 
     print(f"Using device: {device}")
+    print(f"Model: {resolve_model_name(args)}")
     print(f"Start mode: {'dense' if args.dense_start else 'sparse'}")
     print(f"Initial active parameters: {active_parameter_count(model)}")
 
@@ -373,6 +455,13 @@ def main() -> None:
                 "pruned_hidden1": int(neuron_stats["pruned_hidden1"]),
                 "pruned_hidden2": int(neuron_stats["pruned_hidden2"]),
                 "mean_pruned_neuron_score": f"{neuron_stats['mean_pruned_neuron_score']:.6f}",
+                "pruned_channels": int(neuron_stats.get("pruned_channels", 0.0)),
+                "pruned_conv0_channels": int(neuron_stats.get("pruned_conv0_channels", 0.0)),
+                "pruned_conv1_channels": int(neuron_stats.get("pruned_conv1_channels", 0.0)),
+                "pruned_conv2_channels": int(neuron_stats.get("pruned_conv2_channels", 0.0)),
+                "pruned_conv3_channels": int(neuron_stats.get("pruned_conv3_channels", 0.0)),
+                "pruned_conv4_channels": int(neuron_stats.get("pruned_conv4_channels", 0.0)),
+                "mean_pruned_channel_score": f"{neuron_stats.get('mean_pruned_channel_score', 0.0):.6f}",
                 "compacted": int(has_compacted),
                 "sage_focus_steps": int(focus_stats["sage_focus_steps"]),
                 "mean_boosted_edges": f"{focus_stats['mean_boosted_edges']:.6f}",
@@ -392,7 +481,7 @@ def main() -> None:
                 f"grown={int(growth_stats['grown_edges'])} "
                 f"pruned_neurons={int(neuron_stats['pruned_neurons'])} "
                 f"focus_steps={int(focus_stats['sage_focus_steps'])} "
-                f"hidden={model.active_hidden_counts()}"
+                f"{model_structure_label(model)}"
             )
 
     print(f"Wrote CSV log to {args.log_path}")

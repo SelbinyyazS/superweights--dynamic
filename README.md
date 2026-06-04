@@ -5,13 +5,16 @@ This is a minimal PyTorch prototype for studying superactivation-guided sparse s
 Included:
 
 - `MaskedLinear`: dense `weight` parameter plus a binary edge mask
+- `MaskedConv2d`: dense convolution weights plus a binary kernel mask
 - `SparseMLP`: `784 -> hidden_dim -> hidden_dim -> 10`
+- `SageCifarCNN`: compactable CIFAR-10 CNN with structured channel pruning
 - random, gradient, and SAGE growth
 - pruning by lowest active weight magnitude
-- MNIST and Fashion-MNIST training
+- MNIST, Fashion-MNIST, and CIFAR-10 training
 - CSV logging for epoch, loss, accuracy, active parameter count, and superweight concentration
 - layer-wise SAGE score and rewiring diagnostics
 - dense-start focused pruning, masked neuron pruning, and physical hidden-layer compaction
+- dense-start focused channel pruning and physical convolutional compaction for CIFAR-10
 
 ## Setup
 
@@ -20,6 +23,26 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
+
+## Running On Colab
+
+Use Colab for CIFAR-10 or larger runs if your laptop is slow. The notebook is:
+
+```text
+notebooks/sage_cifar10_colab.ipynb
+```
+
+Colab clones from GitHub, so push your latest local `main` first:
+
+```bash
+git add README.md run_multiseed.py smoke_test.py summarize_logs.py train.py src notebooks
+git commit -m "Add CIFAR-10 SAGE channel pruning"
+git push origin main
+```
+
+Then open `notebooks/sage_cifar10_colab.ipynb` in Colab, choose `Runtime -> Change runtime type -> T4 GPU` or better, and run the cells in order. Start with the short CIFAR sanity run before launching the full multiseed sweep.
+
+If the GitHub repo is private, create a GitHub token with read access to this repo, then add it in Colab under `Secrets` with the name `GITHUB_TOKEN` before running the clone cell. The notebook will use that secret automatically.
 
 ## Dense-To-Focused Training
 
@@ -49,6 +72,66 @@ The phases are:
 4. Stage 2 final physical compaction: after the last training epoch, surviving hidden neurons are copied into a smaller `SparseMLP`, reducing actual dense layer dimensions.
 
 Use a positive value like `--compact_epoch 12` to compact during training. Use `--compact_epoch -1` for the cleaner first experiment: prune with masks throughout training, then compact once at the end and log the final smaller physical model.
+
+## CIFAR-10 Channel Pruning
+
+MNIST and Fashion-MNIST are sanity checks. The next meaningful benchmark is CIFAR-10 with a convolutional model:
+
+```bash
+python train.py \
+  --dataset cifar10 \
+  --model cifar_cnn \
+  --dense_start \
+  --growth_interval 0 \
+  --epochs 80 \
+  --post_compact_epochs 20 \
+  --base_channels 64 \
+  --batch_size 128 \
+  --lr 0.001 \
+  --neuron_prune_start_epoch 20 \
+  --neuron_prune_end_epoch 80 \
+  --neuron_prune_interval 2 \
+  --neuron_prune_fraction 0.03 \
+  --neuron_prune_mode sage \
+  --neuron_protect_fraction 0.05 \
+  --min_hidden_neurons 8 \
+  --compact_epoch -1 \
+  --sage_focus_start_epoch 20 \
+  --sage_grad_boost 1.15 \
+  --sage_boost_fraction 0.03 \
+  --weak_grad_decay 0.95 \
+  --log_path logs/cifar10_sage_channels.csv
+```
+
+For CIFAR-10, `prune_weak_neurons` means "prune weak convolution channels." A pruned channel zeros the producer conv output, the corresponding downstream conv input, and finally the classifier input for the last conv layer. At compaction, surviving channels are copied into smaller dense convolution tensors, so `physical_parameter_count` drops without using sparse tensors.
+
+Run the CIFAR multiseed comparison:
+
+```bash
+python run_multiseed.py \
+  --dataset cifar10 \
+  --model cifar_cnn \
+  --seeds 1 2 3 \
+  --epochs 80 \
+  --post_compact_epochs 20 \
+  --base_channels 64 \
+  --output_dir logs/cifar10_stage3 \
+  --neuron_prune_start_epoch 20 \
+  --neuron_prune_end_epoch 80 \
+  --neuron_prune_interval 2 \
+  --neuron_prune_fraction 0.03 \
+  --sage_focus_start_epoch 20 \
+  --sage_grad_boost 1.15 \
+  --sage_boost_fraction 0.03 \
+  --weak_grad_decay 0.95
+```
+
+Then summarize:
+
+```bash
+python summarize_logs.py --aggregate logs/cifar10_stage3/*.csv \
+  --output results/cifar10_stage3_aggregate.csv
+```
 
 ## SAGE Strengthening
 
@@ -95,6 +178,7 @@ python smoke_test.py
 ```
 
 It verifies that SAGE scores update during backward, inactive gradients are zeroed before the optimizer step, inactive weights are zero after the step, the active edge count stays constant after prune-grow, hidden neurons can be mask-pruned, and the compacted model matches the masked model's output.
+It also runs a synthetic CIFAR-shaped CNN check for channel pruning and convolutional compaction.
 
 ## Dataset Smoke Run
 
@@ -111,13 +195,30 @@ python train.py \
   --log_path logs/smoke.csv
 ```
 
+CIFAR-10 quick debug run:
+
+```bash
+python train.py \
+  --dataset cifar10 \
+  --model cifar_cnn \
+  --dense_start \
+  --epochs 1 \
+  --base_channels 16 \
+  --train_batches 2 \
+  --eval_batches 2 \
+  --num_workers 0 \
+  --log_path logs/cifar10_smoke.csv
+```
+
 ## CLI Arguments
 
-- `--dataset`: `mnist`, `fashion-mnist`, or `fashion_mnist`
+- `--dataset`: `mnist`, `fashion-mnist`, `fashion_mnist`, `cifar10`, or `cifar-10`
+- `--model`: `auto`, `mlp`, or `cifar_cnn`; `auto` uses `cifar_cnn` for CIFAR-10
 - `--sparsity`: fraction of masked-out weights at initialization
 - `--growth_mode`: `random`, `gradient`, or `sage`
 - `--epochs`: number of training epochs
 - `--hidden_dim`: hidden layer width
+- `--base_channels`: starting width for the CIFAR CNN; the conv stack is `C, C, 2C, 2C, 4C`
 - `--growth_interval`: optimizer steps between prune-grow updates; set to `0` to disable growth
 - `--prune_fraction`: fraction of active weights to prune and regrow at each update
 - `--dense_start`: start with all edges active

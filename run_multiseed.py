@@ -13,9 +13,20 @@ def parse_args() -> argparse.Namespace:
         choices=["dense", "sage", "magnitude", "random"],
         default=["dense", "sage", "magnitude", "random"],
     )
-    parser.add_argument("--dataset", choices=["mnist", "fashion-mnist", "fashion_mnist"], default="mnist")
+    parser.add_argument(
+        "--dataset",
+        choices=["mnist", "fashion-mnist", "fashion_mnist", "cifar10", "cifar-10"],
+        default="mnist",
+    )
+    parser.add_argument(
+        "--model",
+        choices=["auto", "mlp", "cifar_cnn"],
+        default="auto",
+        help="Model family passed to train.py.",
+    )
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--hidden_dim", type=int, default=256)
+    parser.add_argument("--base_channels", type=int, default=64)
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--data_dir", type=Path, default=Path("data"))
@@ -62,6 +73,8 @@ def build_command(args: argparse.Namespace, mode: str, seed: int, log_path: Path
         "train.py",
         "--dataset",
         args.dataset,
+        "--model",
+        args.model,
         "--dense_start",
         "--growth_interval",
         "0",
@@ -69,6 +82,8 @@ def build_command(args: argparse.Namespace, mode: str, seed: int, log_path: Path
         str(args.epochs + args.post_compact_epochs if mode == "dense" else args.epochs),
         "--hidden_dim",
         str(args.hidden_dim),
+        "--base_channels",
+        str(args.base_channels),
         "--batch_size",
         str(args.batch_size),
         "--lr",
