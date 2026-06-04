@@ -8,6 +8,7 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
+from src.models.pruning_modes import VALID_NEURON_PRUNE_MODES
 from src.models.sage_cnn import SageCifarCNN
 from src.models.sparse_mlp import SparseMLP
 from src.utils.metrics import (
@@ -77,7 +78,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--neuron_prune_fraction", type=float, default=0.0)
     parser.add_argument(
         "--neuron_prune_mode",
-        choices=["sage", "magnitude", "random"],
+        choices=VALID_NEURON_PRUNE_MODES,
         default="sage",
     )
     parser.add_argument("--neuron_protect_fraction", type=float, default=0.05)

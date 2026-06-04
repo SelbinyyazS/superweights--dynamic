@@ -105,6 +105,59 @@ python train.py \
 
 For CIFAR-10, `prune_weak_neurons` means "prune weak convolution channels." A pruned channel zeros the producer conv output, the corresponding downstream conv input, and finally the classifier input for the last conv layer. At compaction, surviving channels are copied into smaller dense convolution tensors, so `physical_parameter_count` drops without using sparse tensors.
 
+Important FLOP distinction:
+
+- During masked pruning, dense PyTorch layers still execute the original physical matrix/conv shapes. Active masks reduce trainable/logical structure, but not dense FLOPs.
+- After `compact()`, surviving neurons/channels are copied into smaller dense tensors. That is when `physical_forward_flops` and actual dense compute potential drop.
+- `active_forward_flops` is the ideal masked/sparse work if a future sparse or custom kernel skipped inactive weights.
+
+Render a structure/FLOP SVG from any training log:
+
+```bash
+python visualize_structure.py logs/cifar10_sage_channels.csv \
+  --output results/cifar10_sage_channels_structure.svg
+```
+
+The SVG shows physical FLOPs, active masked FLOPs, active channel/neuron counts, and before/after matrix or convolution tensor dimensions.
+
+## Diagnostic Pruning Ablations
+
+For paper-quality evidence, first isolate the pruning signal. The available structured pruning modes are:
+
+- `sage_pure`: pure SAGE score, `EMA(|activation|) * EMA(|grad_output|)`
+- `activation`: activation-only score
+- `gradient`: gradient-output-only score
+- `magnitude`: incoming/outgoing active weight magnitude flow
+- `taylor`: first-order weight saliency, `|weight * grad_weight|`
+- `random`: random structured pruning baseline
+- `sage`: legacy mixed score from the first prototype
+- `sage_mixed`: explicit alias for the legacy mixed score
+
+Run a one-seed CIFAR-10 ablation:
+
+```bash
+python run_multiseed.py \
+  --dataset cifar10 \
+  --model cifar_cnn \
+  --modes dense sage_pure activation gradient taylor magnitude random \
+  --seeds 1 \
+  --epochs 30 \
+  --post_compact_epochs 5 \
+  --base_channels 32 \
+  --output_dir logs/cifar10_ablation_seed1 \
+  --neuron_prune_start_epoch 10 \
+  --neuron_prune_end_epoch 30 \
+  --neuron_prune_interval 2 \
+  --neuron_prune_fraction 0.03
+```
+
+Then summarize:
+
+```bash
+python summarize_logs.py --aggregate logs/cifar10_ablation_seed1/*.csv \
+  --output results/cifar10_ablation_seed1_aggregate.csv
+```
+
 Run the CIFAR multiseed comparison:
 
 ```bash
@@ -226,7 +279,7 @@ python train.py \
 - `--neuron_prune_end_epoch`: last epoch for masked neuron pruning; `0` means the main `--epochs` value
 - `--neuron_prune_interval`: epochs between neuron-pruning events
 - `--neuron_prune_fraction`: fraction of currently active hidden neurons to prune per event
-- `--neuron_prune_mode`: `sage`, `magnitude`, or `random`
+- `--neuron_prune_mode`: `sage`, `sage_pure`, `sage_mixed`, `activation`, `gradient`, `magnitude`, `taylor`, or `random`
 - `--neuron_protect_fraction`: fraction of highest-score hidden neurons protected from pruning
 - `--min_hidden_neurons`: minimum surviving neurons per hidden layer
 - `--compact_epoch`: epoch when surviving hidden neurons are copied into a physically smaller model; `-1` compacts after the final training epoch, `0` disables compaction
@@ -326,8 +379,8 @@ python summarize_logs.py --aggregate logs/multiseed/*.csv
 
 Useful runner options:
 
-- `--modes dense sage magnitude random`: choose which experiment modes to run
-- `--dataset mnist` or `--dataset fashion-mnist`
+- `--modes dense sage_pure activation gradient taylor magnitude random`: choose which experiment modes to run
+- `--dataset mnist`, `--dataset fashion-mnist`, or `--dataset cifar10`
 - `--skip_existing`: resume without rerunning completed logs
 - `--dry_run`: print commands without running them
 - `--train_batches` and `--eval_batches`: quick debugging runs
@@ -344,4 +397,4 @@ mean_batch(|grad_output_j|) * mean_batch(|activation_i|)
 
 Inactive edges are kept inactive by masking gradients before `optimizer.step()` and masking weights immediately after the step. Superweight concentration is logged as the share of active weight magnitude held by the top 1% of active weights.
 
-For hidden neuron pruning, SAGE scores each hidden neuron using activation EMA, gradient-output EMA, incoming/outgoing active weight flow, and incoming/outgoing SAGE edge score flow. Stage 1 reduces logical active structure with masks. Stage 2 reduces actual dense layer dimensions by copying only surviving hidden neurons.
+For structured pruning, `sage_pure` scores each hidden neuron or conv channel with activation EMA times gradient-output EMA. The legacy `sage`/`sage_mixed` mode also mixes in magnitude flow and incoming/outgoing SAGE edge-score flow. Stage 1 reduces logical active structure with masks. Stage 2 reduces actual dense layer dimensions by copying only surviving neurons or channels.

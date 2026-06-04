@@ -4,6 +4,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from src.models.pruning_modes import validate_neuron_prune_mode
 from src.models.sage_conv import MaskedConv2d
 from src.models.sage_layer import FocusStats, GrowthMode, GrowthStats, MaskedLinear
 
@@ -14,6 +15,8 @@ NeuronPruneMode = str
 
 class SageCifarCNN(nn.Module):
     """Small CIFAR CNN with SAGE-guided structured channel pruning."""
+
+    conv_output_sizes = (32, 32, 16, 16, 8)
 
     def __init__(
         self,
@@ -128,6 +131,21 @@ class SageCifarCNN(nn.Module):
     def active_parameter_count(self) -> int:
         return sum(layer.active_parameter_count() for layer in self.masked_layers())
 
+    def forward_flop_metrics(self) -> dict[str, float]:
+        physical_flops = 0.0
+        active_flops = 0.0
+        for conv, output_size in zip(self.convs, self.conv_output_sizes):
+            output_positions = output_size * output_size
+            physical_flops += 2.0 * conv.weight.numel() * output_positions
+            active_flops += 2.0 * conv.mask.sum().item() * output_positions
+
+        physical_flops += 2.0 * self.classifier.weight.numel()
+        active_flops += 2.0 * self.classifier.mask.sum().item()
+        return {
+            "physical_forward_flops": physical_flops,
+            "active_forward_flops": active_flops,
+        }
+
     def apply_sage_gradient_focus(
         self,
         boost_factor: float,
@@ -209,8 +227,7 @@ class SageCifarCNN(nn.Module):
     ) -> torch.Tensor:
         if not 0 <= conv_idx < len(self.convs):
             raise ValueError("conv_idx is out of range.")
-        if mode not in ("sage", "magnitude", "random"):
-            raise ValueError("mode must be one of: sage, magnitude, random.")
+        validate_neuron_prune_mode(mode)
 
         producer = self.convs[conv_idx]
         channel_mask = self.channel_masks()[conv_idx].bool()
@@ -231,15 +248,51 @@ class SageCifarCNN(nn.Module):
             return magnitude_score.masked_fill(~channel_mask, float("-inf"))
         if mode == "random":
             return torch.rand_like(magnitude_score).masked_fill(~channel_mask, float("-inf"))
+        if mode == "activation":
+            return self._normalize(producer.activation_ema.detach()).masked_fill(
+                ~channel_mask,
+                float("-inf"),
+            )
+        if mode == "gradient":
+            return self._normalize(producer.grad_output_ema.detach()).masked_fill(
+                ~channel_mask,
+                float("-inf"),
+            )
 
         incoming_sage = producer.score_ema.detach().sum(dim=(1, 2, 3))
         activity_signal = producer.activation_ema.detach() * producer.grad_output_ema.detach()
+        if mode == "sage_pure":
+            return self._normalize(activity_signal).masked_fill(~channel_mask, float("-inf"))
+        if mode == "taylor":
+            incoming_taylor = self._conv_taylor_flow(producer, dim=1)
+            if conv_idx + 1 < len(self.convs):
+                outgoing_taylor = self._conv_taylor_flow(self.convs[conv_idx + 1], dim=0)
+            else:
+                outgoing_taylor = self._linear_taylor_flow(self.classifier, dim=0)
+            taylor_score = self._normalize((incoming_taylor * outgoing_taylor).sqrt())
+            return taylor_score.masked_fill(~channel_mask, float("-inf"))
+
         score = (
             self._normalize(activity_signal)
             + magnitude_score
             + self._normalize(incoming_sage + outgoing_sage)
         )
         return score.masked_fill(~channel_mask, float("-inf"))
+
+    @staticmethod
+    def _conv_taylor_flow(layer: MaskedConv2d, dim: int) -> torch.Tensor:
+        if layer.weight.grad is None:
+            output_size = layer.out_channels if dim == 1 else layer.in_channels
+            return torch.zeros(output_size, device=layer.weight.device, dtype=layer.weight.dtype)
+        dims = (1, 2, 3) if dim == 1 else (0, 2, 3)
+        return (layer.weight.detach() * layer.weight.grad.detach()).abs().mul(layer.mask).sum(dim=dims)
+
+    @staticmethod
+    def _linear_taylor_flow(layer: MaskedLinear, dim: int) -> torch.Tensor:
+        if layer.weight.grad is None:
+            output_size = layer.weight.shape[1 - dim]
+            return torch.zeros(output_size, device=layer.weight.device, dtype=layer.weight.dtype)
+        return (layer.weight.detach() * layer.weight.grad.detach()).abs().mul(layer.mask).sum(dim=dim)
 
     @staticmethod
     def _normalize(values: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
@@ -278,8 +331,7 @@ class SageCifarCNN(nn.Module):
             raise ValueError("prune_fraction must be in [0, 1].")
         if not 0.0 <= protect_fraction <= 1.0:
             raise ValueError("protect_fraction must be in [0, 1].")
-        if mode not in ("sage", "magnitude", "random"):
-            raise ValueError("mode must be one of: sage, magnitude, random.")
+        validate_neuron_prune_mode(mode)
 
         stats = self._empty_neuron_stats()
         pruned_score_sum = 0.0

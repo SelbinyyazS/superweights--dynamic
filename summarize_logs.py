@@ -4,6 +4,18 @@ import re
 import statistics
 from pathlib import Path
 
+MODE_NAMES = [
+    "sage_pure",
+    "sage_mixed",
+    "activation",
+    "gradient",
+    "magnitude",
+    "random",
+    "taylor",
+    "dense",
+    "sage",
+]
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Summarize SAGE experiment CSV logs.")
@@ -22,14 +34,9 @@ def as_float(row: dict[str, str], key: str, default: float = 0.0) -> float:
 
 def infer_mode(path: Path, final_row: dict[str, str]) -> str:
     name = path.stem.lower()
-    if "dense" in name:
-        return "dense"
-    if "magnitude" in name:
-        return "magnitude"
-    if "random" in name:
-        return "random"
-    if "sage" in name:
-        return "sage"
+    for mode in MODE_NAMES:
+        if mode in name:
+            return mode
 
     logged_mode = final_row.get("neuron_prune_mode", "")
     if logged_mode:
@@ -59,6 +66,11 @@ def summarize_log(path: Path) -> dict[str, float | str]:
     reduction = 0.0
     if initial_physical > 0:
         reduction = 1.0 - final_physical / initial_physical
+    initial_physical_flops = as_float(first, "physical_forward_flops")
+    final_physical_flops = as_float(final, "physical_forward_flops")
+    flop_reduction = 0.0
+    if initial_physical_flops > 0:
+        flop_reduction = 1.0 - final_physical_flops / initial_physical_flops
 
     return {
         "log": str(path),
@@ -72,6 +84,9 @@ def summarize_log(path: Path) -> dict[str, float | str]:
         "final_active_params": as_float(final, "active_parameter_count"),
         "final_physical_params": final_physical,
         "physical_reduction": reduction,
+        "final_physical_flops": final_physical_flops,
+        "physical_flop_reduction": flop_reduction,
+        "final_active_flops": as_float(final, "active_forward_flops"),
         "hidden1_dim": as_float(final, "hidden1_dim"),
         "hidden2_dim": as_float(final, "hidden2_dim"),
         "active_hidden1": as_float(final, "active_hidden1"),
@@ -131,6 +146,8 @@ def aggregate_summaries(summaries: list[dict[str, float | str]]) -> list[dict[st
         best_acc = [float(summary["best_accuracy"]) for summary in mode_summaries]
         final_params = [float(summary["final_physical_params"]) for summary in mode_summaries]
         reductions = [float(summary["physical_reduction"]) for summary in mode_summaries]
+        final_flops = [float(summary["final_physical_flops"]) for summary in mode_summaries]
+        flop_reductions = [float(summary["physical_flop_reduction"]) for summary in mode_summaries]
         concentrations = [float(summary["concentration"]) for summary in mode_summaries]
         hidden1 = [float(summary["hidden1_dim"]) for summary in mode_summaries]
         hidden2 = [float(summary["hidden2_dim"]) for summary in mode_summaries]
@@ -145,6 +162,8 @@ def aggregate_summaries(summaries: list[dict[str, float | str]]) -> list[dict[st
                 "best_accuracy_std": std(best_acc),
                 "final_physical_params_mean": mean(final_params),
                 "physical_reduction_mean": mean(reductions),
+                "final_physical_flops_mean": mean(final_flops),
+                "physical_flop_reduction_mean": mean(flop_reductions),
                 "hidden1_dim_mean": mean(hidden1),
                 "hidden2_dim_mean": mean(hidden2),
                 "total_active_channels_mean": mean(active_channels),
@@ -170,6 +189,8 @@ def main() -> None:
             "best_accuracy_std",
             "final_physical_params_mean",
             "physical_reduction_mean",
+            "final_physical_flops_mean",
+            "physical_flop_reduction_mean",
             "hidden1_dim_mean",
             "hidden2_dim_mean",
             "total_active_channels_mean",
@@ -187,6 +208,9 @@ def main() -> None:
             "best_epoch",
             "final_physical_params",
             "physical_reduction",
+            "final_physical_flops",
+            "physical_flop_reduction",
+            "final_active_flops",
             "hidden1_dim",
             "hidden2_dim",
             "total_active_channels",

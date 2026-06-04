@@ -2,6 +2,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from src.models.pruning_modes import validate_neuron_prune_mode
 from src.models.sage_layer import FocusStats, GrowthMode, GrowthStats, MaskedLinear
 
 
@@ -80,6 +81,14 @@ class SparseMLP(nn.Module):
     def active_parameter_count(self) -> int:
         return sum(layer.active_parameter_count() for layer in self.masked_layers())
 
+    def forward_flop_metrics(self) -> dict[str, float]:
+        physical_flops = sum(2 * layer.weight.numel() for layer in self.masked_layers())
+        active_flops = sum(2 * layer.mask.sum().item() for layer in self.masked_layers())
+        return {
+            "physical_forward_flops": float(physical_flops),
+            "active_forward_flops": float(active_flops),
+        }
+
     def apply_sage_gradient_focus(
         self,
         boost_factor: float,
@@ -138,8 +147,7 @@ class SparseMLP(nn.Module):
             neuron_mask = self.hidden2_neuron_mask.bool()
         else:
             raise ValueError("hidden_layer_idx must be 0 or 1.")
-        if mode not in ("sage", "magnitude", "random"):
-            raise ValueError("mode must be one of: sage, magnitude, random.")
+        validate_neuron_prune_mode(mode)
 
         incoming_weight = (producer.weight.detach().abs() * producer.mask).sum(dim=1)
         outgoing_weight = (consumer.weight.detach().abs() * consumer.mask).sum(dim=0)
@@ -148,10 +156,27 @@ class SparseMLP(nn.Module):
             return magnitude_score.masked_fill(~neuron_mask, float("-inf"))
         if mode == "random":
             return torch.rand_like(magnitude_score).masked_fill(~neuron_mask, float("-inf"))
+        if mode == "activation":
+            return self._normalize(producer.activation_ema.detach()).masked_fill(
+                ~neuron_mask,
+                float("-inf"),
+            )
+        if mode == "gradient":
+            return self._normalize(producer.grad_output_ema.detach()).masked_fill(
+                ~neuron_mask,
+                float("-inf"),
+            )
 
         incoming_sage = producer.score_ema.detach().sum(dim=1)
         outgoing_sage = consumer.score_ema.detach().sum(dim=0)
         activity_signal = producer.activation_ema.detach() * producer.grad_output_ema.detach()
+        if mode == "sage_pure":
+            return self._normalize(activity_signal).masked_fill(~neuron_mask, float("-inf"))
+        if mode == "taylor":
+            incoming_taylor = self._weight_taylor_flow(producer, dim=1)
+            outgoing_taylor = self._weight_taylor_flow(consumer, dim=0)
+            taylor_score = self._normalize((incoming_taylor * outgoing_taylor).sqrt())
+            return taylor_score.masked_fill(~neuron_mask, float("-inf"))
 
         score = (
             self._normalize(activity_signal)
@@ -159,6 +184,16 @@ class SparseMLP(nn.Module):
             + self._normalize(incoming_sage + outgoing_sage)
         )
         return score.masked_fill(~neuron_mask, float("-inf"))
+
+    @staticmethod
+    def _weight_taylor_flow(layer: MaskedLinear, dim: int) -> torch.Tensor:
+        if layer.weight.grad is None:
+            return torch.zeros(
+                layer.weight.shape[1 - dim],
+                device=layer.weight.device,
+                dtype=layer.weight.dtype,
+            )
+        return (layer.weight.detach() * layer.weight.grad.detach()).abs().mul(layer.mask).sum(dim=dim)
 
     @staticmethod
     def _normalize(values: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
@@ -191,8 +226,7 @@ class SparseMLP(nn.Module):
             raise ValueError("prune_fraction must be in [0, 1].")
         if not 0.0 <= protect_fraction <= 1.0:
             raise ValueError("protect_fraction must be in [0, 1].")
-        if mode not in ("sage", "magnitude", "random"):
-            raise ValueError("mode must be one of: sage, magnitude, random.")
+        validate_neuron_prune_mode(mode)
 
         stats = self._empty_neuron_stats()
         pruned_score_sum = 0.0

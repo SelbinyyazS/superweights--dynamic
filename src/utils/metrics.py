@@ -73,6 +73,8 @@ def structure_metrics(model: nn.Module) -> dict[str, float]:
     metrics = {
         "physical_parameter_count": float(physical_parameter_count(model)),
     }
+    if hasattr(model, "forward_flop_metrics"):
+        metrics.update(model.forward_flop_metrics())
     if hasattr(model, "structure_metrics"):
         metrics.update(model.structure_metrics())
     if hasattr(model, "hidden_dims") and hasattr(model, "active_hidden_counts"):

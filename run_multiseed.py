@@ -3,14 +3,16 @@ import subprocess
 import sys
 from pathlib import Path
 
+from src.models.pruning_modes import VALID_NEURON_PRUNE_MODES
+
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run dense/SAGE/magnitude/random experiments across seeds.")
+    parser = argparse.ArgumentParser(description="Run dense/structured-pruning experiments across seeds.")
     parser.add_argument("--seeds", nargs="+", type=int, default=[1, 2, 3])
     parser.add_argument(
         "--modes",
         nargs="+",
-        choices=["dense", "sage", "magnitude", "random"],
+        choices=("dense", *VALID_NEURON_PRUNE_MODES),
         default=["dense", "sage", "magnitude", "random"],
     )
     parser.add_argument(
@@ -125,7 +127,7 @@ def build_command(args: argparse.Namespace, mode: str, seed: int, log_path: Path
                 str(args.post_compact_epochs),
             ]
         )
-        if mode == "sage":
+        if mode in ("sage", "sage_mixed"):
             command.extend(
                 [
                     "--sage_focus_start_epoch",

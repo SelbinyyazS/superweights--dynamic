@@ -1,6 +1,7 @@
 import torch
 from torch.nn import functional as F
 
+from src.models.pruning_modes import VALID_NEURON_PRUNE_MODES
 from src.models.sage_cnn import SageCifarCNN
 from src.models.sparse_mlp import SparseMLP
 from src.utils.metrics import active_parameter_count, superweight_concentration
@@ -22,6 +23,10 @@ def run_mlp_smoke() -> None:
 
     sage_score_sum = sum(layer.score_ema.sum().item() for layer in model.masked_layers())
     assert sage_score_sum > 0.0, "SAGE score EMA did not update during backward."
+
+    for mode in VALID_NEURON_PRUNE_MODES:
+        importance = model.hidden_neuron_importance(0, mode=mode)
+        assert importance.shape == model.hidden1_neuron_mask.shape
 
     focus_stats = model.apply_sage_gradient_focus(
         boost_factor=1.25,
@@ -104,6 +109,10 @@ def run_cifar_cnn_smoke() -> None:
 
     sage_score_sum = sum(layer.score_ema.sum().item() for layer in model.masked_layers())
     assert sage_score_sum > 0.0, "CNN SAGE score EMA did not update during backward."
+
+    for mode in VALID_NEURON_PRUNE_MODES:
+        importance = model.channel_importance(0, mode=mode)
+        assert importance.shape == model.channel_masks()[0].shape
 
     focus_stats = model.apply_sage_gradient_focus(
         boost_factor=1.10,
