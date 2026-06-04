@@ -1,0 +1,5 @@
+mode,n,final_accuracy_mean,final_accuracy_std,best_accuracy_mean,best_accuracy_std,final_physical_params_mean,physical_reduction_mean,hidden1_dim_mean,hidden2_dim_mean,concentration_mean,concentration_std
+dense,3,0.8899,0.0034,0.8942,0.0015,268800,0.00%,256,256,0.0506,0.0006
+magnitude,3,0.8855,0.0010,0.8926,0.0012,106587,60.35%,117,117,0.0480,0.0004
+random,3,0.8860,0.0040,0.8900,0.0027,106587,60.35%,117,117,0.0508,0.0004
+sage,3,0.8877,0.0031,0.8921,0.0014,106587,60.35%,117,117,0.0481,0.0007

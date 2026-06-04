@@ -35,6 +35,10 @@ BASE_FIELDNAMES = [
     "pruned_hidden2",
     "mean_pruned_neuron_score",
     "compacted",
+    "sage_focus_steps",
+    "mean_boosted_edges",
+    "mean_weak_scaled_edges",
+    "mean_boosted_score",
 ]
 
 
@@ -49,6 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--growth_interval", type=int, default=100)
     parser.add_argument("--prune_fraction", type=float, default=0.05)
     parser.add_argument("--neuron_prune_start_epoch", type=int, default=0)
+    parser.add_argument("--neuron_prune_end_epoch", type=int, default=0)
     parser.add_argument("--neuron_prune_interval", type=int, default=1)
     parser.add_argument("--neuron_prune_fraction", type=float, default=0.0)
     parser.add_argument(
@@ -64,6 +69,12 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Epoch for physical compaction; -1 compacts after the final training epoch, 0 disables it.",
     )
+    parser.add_argument("--post_compact_epochs", type=int, default=0)
+    parser.add_argument("--sage_focus_start_epoch", type=int, default=0)
+    parser.add_argument("--sage_focus_end_epoch", type=int, default=0)
+    parser.add_argument("--sage_grad_boost", type=float, default=1.0)
+    parser.add_argument("--sage_boost_fraction", type=float, default=0.0)
+    parser.add_argument("--weak_grad_decay", type=float, default=1.0)
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--data_dir", type=Path, default=Path("data"))
@@ -154,14 +165,55 @@ def empty_epoch_neuron_stats() -> dict[str, float]:
     }
 
 
+def empty_epoch_focus_stats() -> dict[str, float]:
+    return {
+        "sage_focus_steps": 0.0,
+        "mean_boosted_edges": 0.0,
+        "mean_weak_scaled_edges": 0.0,
+        "mean_boosted_score": 0.0,
+    }
+
+
+def update_epoch_focus_stats(epoch_stats: dict[str, float], focus_stats: dict[str, float]) -> None:
+    if focus_stats["boosted_edges"] <= 0:
+        return
+    epoch_stats["sage_focus_steps"] += 1.0
+    epoch_stats["mean_boosted_edges"] += focus_stats["boosted_edges"]
+    epoch_stats["mean_weak_scaled_edges"] += focus_stats["weak_scaled_edges"]
+    epoch_stats["mean_boosted_score"] += focus_stats["mean_boosted_score"]
+
+
+def finalize_epoch_focus_stats(epoch_stats: dict[str, float]) -> dict[str, float]:
+    finalized = dict(epoch_stats)
+    if finalized["sage_focus_steps"] > 0:
+        finalized["mean_boosted_edges"] /= finalized["sage_focus_steps"]
+        finalized["mean_weak_scaled_edges"] /= finalized["sage_focus_steps"]
+        finalized["mean_boosted_score"] /= finalized["sage_focus_steps"]
+    return finalized
+
+
 def should_prune_neurons(args: argparse.Namespace, epoch: int) -> bool:
+    prune_end_epoch = args.neuron_prune_end_epoch if args.neuron_prune_end_epoch > 0 else args.epochs
     return (
         args.neuron_prune_fraction > 0.0
         and args.neuron_prune_start_epoch > 0
         and args.neuron_prune_interval > 0
         and epoch >= args.neuron_prune_start_epoch
+        and epoch <= prune_end_epoch
         and (epoch - args.neuron_prune_start_epoch) % args.neuron_prune_interval == 0
     )
+
+
+def should_focus_sage_paths(args: argparse.Namespace, epoch: int) -> bool:
+    if args.sage_boost_fraction <= 0.0:
+        return False
+    if args.sage_grad_boost == 1.0 and args.weak_grad_decay == 1.0:
+        return False
+    focus_start = args.sage_focus_start_epoch
+    if focus_start <= 0:
+        focus_start = args.neuron_prune_start_epoch
+    focus_end = args.sage_focus_end_epoch
+    return epoch >= focus_start and (focus_end <= 0 or epoch <= focus_end)
 
 
 def should_compact(args: argparse.Namespace, epoch: int) -> bool:
@@ -177,9 +229,11 @@ def train_epoch(
     device: torch.device,
     args: argparse.Namespace,
     global_step: int,
-) -> tuple[int, dict[str, float]]:
+    epoch: int,
+) -> tuple[int, dict[str, float], dict[str, float]]:
     model.train()
     epoch_growth_stats = empty_epoch_growth_stats()
+    epoch_focus_stats = empty_epoch_focus_stats()
     for batch_idx, (inputs, targets) in enumerate(loader, start=1):
         if args.train_batches and batch_idx > args.train_batches:
             break
@@ -201,11 +255,23 @@ def train_epoch(
             growth_stats = model.prune_and_grow(args.prune_fraction, args.growth_mode)
             update_epoch_growth_stats(epoch_growth_stats, growth_stats)
 
+        if should_focus_sage_paths(args, epoch):
+            focus_stats = model.apply_sage_gradient_focus(
+                boost_factor=args.sage_grad_boost,
+                boost_fraction=args.sage_boost_fraction,
+                weak_grad_decay=args.weak_grad_decay,
+            )
+            update_epoch_focus_stats(epoch_focus_stats, focus_stats)
+
         model.mask_gradients()
         optimizer.step()
         model.apply_mask_to_weights()
 
-    return global_step, finalize_epoch_growth_stats(epoch_growth_stats)
+    return (
+        global_step,
+        finalize_epoch_growth_stats(epoch_growth_stats),
+        finalize_epoch_focus_stats(epoch_focus_stats),
+    )
 
 
 @torch.no_grad()
@@ -258,14 +324,17 @@ def main() -> None:
         writer = csv.DictWriter(log_file, fieldnames=fieldnames)
         writer.writeheader()
 
-        for epoch in range(1, args.epochs + 1):
-            global_step, growth_stats = train_epoch(
+        total_epochs = args.epochs + args.post_compact_epochs
+        has_compacted = False
+        for epoch in range(1, total_epochs + 1):
+            global_step, growth_stats, focus_stats = train_epoch(
                 model,
                 train_loader,
                 optimizer,
                 device,
                 args,
                 global_step,
+                epoch,
             )
 
             neuron_stats = empty_epoch_neuron_stats()
@@ -278,11 +347,10 @@ def main() -> None:
                 )
                 model.apply_mask_to_weights()
 
-            compacted = 0
-            if should_compact(args, epoch):
+            if not has_compacted and should_compact(args, epoch):
                 model = model.compact().to(device)
                 optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-                compacted = 1
+                has_compacted = True
 
             loss, acc = evaluate(model, eval_loader, device, args.eval_batches)
             active_params = active_parameter_count(model)
@@ -305,7 +373,11 @@ def main() -> None:
                 "pruned_hidden1": int(neuron_stats["pruned_hidden1"]),
                 "pruned_hidden2": int(neuron_stats["pruned_hidden2"]),
                 "mean_pruned_neuron_score": f"{neuron_stats['mean_pruned_neuron_score']:.6f}",
-                "compacted": compacted,
+                "compacted": int(has_compacted),
+                "sage_focus_steps": int(focus_stats["sage_focus_steps"]),
+                "mean_boosted_edges": f"{focus_stats['mean_boosted_edges']:.6f}",
+                "mean_weak_scaled_edges": f"{focus_stats['mean_weak_scaled_edges']:.6f}",
+                "mean_boosted_score": f"{focus_stats['mean_boosted_score']:.6f}",
             }
             for key, value in structure_metrics(model).items():
                 row[key] = int(value)
@@ -319,6 +391,7 @@ def main() -> None:
                 f"active_params={active_params} concentration={concentration:.4f} "
                 f"grown={int(growth_stats['grown_edges'])} "
                 f"pruned_neurons={int(neuron_stats['pruned_neurons'])} "
+                f"focus_steps={int(focus_stats['sage_focus_steps'])} "
                 f"hidden={model.active_hidden_counts()}"
             )
 

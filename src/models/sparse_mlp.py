@@ -2,7 +2,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from src.models.sage_layer import GrowthMode, GrowthStats, MaskedLinear
+from src.models.sage_layer import FocusStats, GrowthMode, GrowthStats, MaskedLinear
 
 
 NeuronStats = dict[str, float]
@@ -79,6 +79,32 @@ class SparseMLP(nn.Module):
 
     def active_parameter_count(self) -> int:
         return sum(layer.active_parameter_count() for layer in self.masked_layers())
+
+    def apply_sage_gradient_focus(
+        self,
+        boost_factor: float,
+        boost_fraction: float,
+        weak_grad_decay: float = 1.0,
+    ) -> FocusStats:
+        total_stats = MaskedLinear._empty_focus_stats()
+        boosted_score_sum = 0.0
+        for layer in self.masked_layers():
+            layer_stats = layer.apply_sage_gradient_focus(
+                boost_factor=boost_factor,
+                boost_fraction=boost_fraction,
+                weak_grad_decay=weak_grad_decay,
+            )
+            total_stats["boosted_edges"] += layer_stats["boosted_edges"]
+            total_stats["weak_scaled_edges"] += layer_stats["weak_scaled_edges"]
+            boosted_score_sum += (
+                layer_stats["mean_boosted_score"] * layer_stats["boosted_edges"]
+            )
+
+        if total_stats["boosted_edges"] > 0:
+            total_stats["mean_boosted_score"] = (
+                boosted_score_sum / total_stats["boosted_edges"]
+            )
+        return total_stats
 
     def hidden_dims(self) -> tuple[int, int]:
         return int(self.hidden1_neuron_mask.numel()), int(self.hidden2_neuron_mask.numel())

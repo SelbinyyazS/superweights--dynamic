@@ -8,6 +8,7 @@ from torch.nn import functional as F
 
 GrowthMode = Literal["random", "gradient", "sage"]
 GrowthStats = dict[str, float]
+FocusStats = dict[str, float]
 
 
 class _MaskedWeight(torch.autograd.Function):
@@ -135,6 +136,58 @@ class MaskedLinear(nn.Module):
 
     def active_parameter_count(self) -> int:
         return int(self.mask.sum().item())
+
+    @staticmethod
+    def _empty_focus_stats() -> FocusStats:
+        return {
+            "boosted_edges": 0.0,
+            "weak_scaled_edges": 0.0,
+            "mean_boosted_score": 0.0,
+        }
+
+    def apply_sage_gradient_focus(
+        self,
+        boost_factor: float,
+        boost_fraction: float,
+        weak_grad_decay: float = 1.0,
+    ) -> FocusStats:
+        stats = self._empty_focus_stats()
+        if self.weight.grad is None or boost_fraction <= 0.0:
+            return stats
+        if boost_factor == 1.0 and weak_grad_decay == 1.0:
+            return stats
+        if boost_factor < 0.0:
+            raise ValueError("boost_factor must be non-negative.")
+        if not 0.0 <= boost_fraction <= 1.0:
+            raise ValueError("boost_fraction must be in [0, 1].")
+        if weak_grad_decay < 0.0:
+            raise ValueError("weak_grad_decay must be non-negative.")
+
+        active_mask = self.mask.bool()
+        active_count = int(active_mask.sum().item())
+        if active_count == 0:
+            return stats
+
+        boost_count = max(1, int(active_count * boost_fraction))
+        boost_count = min(boost_count, active_count)
+
+        with torch.no_grad():
+            flat_grad = self.weight.grad.view(-1)
+            flat_active = active_mask.view(-1)
+            flat_scores = self.score_ema.detach().view(-1)
+            candidate_scores = flat_scores.masked_fill(~flat_active, float("-inf"))
+            boost_idx = torch.topk(candidate_scores, boost_count, largest=True).indices
+
+            weak_mask = flat_active.clone()
+            weak_mask[boost_idx] = False
+            if weak_grad_decay != 1.0:
+                flat_grad[weak_mask] *= weak_grad_decay
+                stats["weak_scaled_edges"] = float(int(weak_mask.sum().item()))
+
+            flat_grad[boost_idx] *= boost_factor
+            stats["boosted_edges"] = float(boost_count)
+            stats["mean_boosted_score"] = candidate_scores[boost_idx].mean().item()
+        return stats
 
     def disable_output_neurons(self, neuron_idx: torch.Tensor) -> None:
         if neuron_idx.numel() == 0:

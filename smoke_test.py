@@ -22,6 +22,13 @@ def main() -> None:
     sage_score_sum = sum(layer.score_ema.sum().item() for layer in model.masked_layers())
     assert sage_score_sum > 0.0, "SAGE score EMA did not update during backward."
 
+    focus_stats = model.apply_sage_gradient_focus(
+        boost_factor=1.25,
+        boost_fraction=0.10,
+        weak_grad_decay=0.90,
+    )
+    assert focus_stats["boosted_edges"] > 0.0
+
     growth_stats = model.prune_and_grow(prune_fraction=0.1, growth_mode="sage")
     model.mask_gradients()
 

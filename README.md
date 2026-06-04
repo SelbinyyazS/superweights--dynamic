@@ -50,6 +50,34 @@ The phases are:
 
 Use a positive value like `--compact_epoch 12` to compact during training. Use `--compact_epoch -1` for the cleaner first experiment: prune with masks throughout training, then compact once at the end and log the final smaller physical model.
 
+## SAGE Strengthening
+
+SAGE-Focus v2 can actively strengthen high-SAGE paths during training. After backward, before the optimizer step, the top active edges by SAGE score can receive a gradient boost while the weaker active edges can be damped:
+
+```bash
+python train.py \
+  --dataset fashion-mnist \
+  --dense_start \
+  --growth_interval 0 \
+  --epochs 20 \
+  --post_compact_epochs 10 \
+  --hidden_dim 256 \
+  --neuron_prune_start_epoch 5 \
+  --neuron_prune_end_epoch 20 \
+  --neuron_prune_interval 1 \
+  --neuron_prune_fraction 0.05 \
+  --neuron_prune_mode sage \
+  --neuron_protect_fraction 0.05 \
+  --compact_epoch -1 \
+  --sage_focus_start_epoch 5 \
+  --sage_grad_boost 1.25 \
+  --sage_boost_fraction 0.05 \
+  --weak_grad_decay 0.90 \
+  --log_path logs/sage_strengthened.csv
+```
+
+This uses 20 prune/discovery epochs, compacts at epoch 20, then fine-tunes the compact model for 10 more epochs. For a fair dense baseline with the same total training budget, run dense for 30 epochs.
+
 ## Sparse-Growth Training
 
 ```bash
@@ -94,12 +122,19 @@ python train.py \
 - `--prune_fraction`: fraction of active weights to prune and regrow at each update
 - `--dense_start`: start with all edges active
 - `--neuron_prune_start_epoch`: first epoch for masked neuron pruning; `0` disables it
+- `--neuron_prune_end_epoch`: last epoch for masked neuron pruning; `0` means the main `--epochs` value
 - `--neuron_prune_interval`: epochs between neuron-pruning events
 - `--neuron_prune_fraction`: fraction of currently active hidden neurons to prune per event
 - `--neuron_prune_mode`: `sage`, `magnitude`, or `random`
 - `--neuron_protect_fraction`: fraction of highest-score hidden neurons protected from pruning
 - `--min_hidden_neurons`: minimum surviving neurons per hidden layer
 - `--compact_epoch`: epoch when surviving hidden neurons are copied into a physically smaller model; `-1` compacts after the final training epoch, `0` disables compaction
+- `--post_compact_epochs`: extra epochs after the main phase, useful for fine-tuning the compacted model
+- `--sage_focus_start_epoch`: first epoch for SAGE-focused gradient scaling; `0` follows `--neuron_prune_start_epoch`
+- `--sage_focus_end_epoch`: final epoch for SAGE-focused gradient scaling; `0` means no end
+- `--sage_grad_boost`: gradient multiplier for top-SAGE active edges
+- `--sage_boost_fraction`: fraction of active edges to boost by SAGE score
+- `--weak_grad_decay`: gradient multiplier for non-boosted active edges
 
 Additional convenience arguments include `--batch_size`, `--lr`, `--data_dir`, `--log_path`, `--seed`, `--num_workers`, `--train_batches`, and `--eval_batches`.
 
@@ -196,6 +231,7 @@ Useful runner options:
 - `--dry_run`: print commands without running them
 - `--train_batches` and `--eval_batches`: quick debugging runs
 - `--python`: choose the Python executable used for `train.py`
+- SAGE strengthening runner options include `--post_compact_epochs`, `--sage_grad_boost`, `--sage_boost_fraction`, and `--weak_grad_decay`
 
 ## Notes
 

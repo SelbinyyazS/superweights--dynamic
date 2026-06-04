@@ -21,11 +21,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data_dir", type=Path, default=Path("data"))
     parser.add_argument("--output_dir", type=Path, default=Path("logs/multiseed"))
     parser.add_argument("--neuron_prune_start_epoch", type=int, default=5)
+    parser.add_argument("--neuron_prune_end_epoch", type=int, default=0)
     parser.add_argument("--neuron_prune_interval", type=int, default=1)
     parser.add_argument("--neuron_prune_fraction", type=float, default=0.05)
     parser.add_argument("--neuron_protect_fraction", type=float, default=0.05)
     parser.add_argument("--min_hidden_neurons", type=int, default=8)
     parser.add_argument("--compact_epoch", type=int, default=-1)
+    parser.add_argument("--post_compact_epochs", type=int, default=0)
+    parser.add_argument("--sage_focus_start_epoch", type=int, default=0)
+    parser.add_argument("--sage_focus_end_epoch", type=int, default=0)
+    parser.add_argument("--sage_grad_boost", type=float, default=1.0)
+    parser.add_argument("--sage_boost_fraction", type=float, default=0.0)
+    parser.add_argument("--weak_grad_decay", type=float, default=1.0)
     parser.add_argument("--train_batches", type=int, default=0)
     parser.add_argument("--eval_batches", type=int, default=0)
     parser.add_argument("--num_workers", type=int, default=2)
@@ -59,7 +66,7 @@ def build_command(args: argparse.Namespace, mode: str, seed: int, log_path: Path
         "--growth_interval",
         "0",
         "--epochs",
-        str(args.epochs),
+        str(args.epochs + args.post_compact_epochs if mode == "dense" else args.epochs),
         "--hidden_dim",
         str(args.hidden_dim),
         "--batch_size",
@@ -85,6 +92,8 @@ def build_command(args: argparse.Namespace, mode: str, seed: int, log_path: Path
             [
                 "--neuron_prune_start_epoch",
                 str(args.neuron_prune_start_epoch),
+                "--neuron_prune_end_epoch",
+                str(args.neuron_prune_end_epoch),
                 "--neuron_prune_interval",
                 str(args.neuron_prune_interval),
                 "--neuron_prune_fraction",
@@ -97,8 +106,25 @@ def build_command(args: argparse.Namespace, mode: str, seed: int, log_path: Path
                 str(args.min_hidden_neurons),
                 "--compact_epoch",
                 str(args.compact_epoch),
+                "--post_compact_epochs",
+                str(args.post_compact_epochs),
             ]
         )
+        if mode == "sage":
+            command.extend(
+                [
+                    "--sage_focus_start_epoch",
+                    str(args.sage_focus_start_epoch),
+                    "--sage_focus_end_epoch",
+                    str(args.sage_focus_end_epoch),
+                    "--sage_grad_boost",
+                    str(args.sage_grad_boost),
+                    "--sage_boost_fraction",
+                    str(args.sage_boost_fraction),
+                    "--weak_grad_decay",
+                    str(args.weak_grad_decay),
+                ]
+            )
     return command
 
 
